@@ -1,3 +1,5 @@
+-- LocalScript to hook it into the player
+
 local Players = game:GetService("Players")
 local Grapple = require(script.Parent.GrappleModule)
 
