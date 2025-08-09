@@ -1,4 +1,33 @@
--- Grappling Hook System for HiddenDevs Application
+--[[
+    GrappleModule.lua
+    -----------------
+    Grappling Hook System for HiddenDevs Application
+
+    OVERVIEW:
+    This system lets a player to shoot a grappling hook towards a valid surface and it
+    visually connects them with a beam which applies pulling force until they reach
+    the target or release early.
+
+    HOW IT WORKS:
+    1. INPUT DETECTION:
+        - Left Mouse Button: Attempt grapple
+        - Q Key: Release hook
+    2. GRAPPLE ATTEMPT:
+        - Performs an angle check.
+        - Raycasts towards the mouse hit position to detect a valid target.
+        - Uses CollectionService for tagged grapple points.
+    3. HOOK CREATION:
+        - Visually represented as a ball that tweens from player to target.
+        - Beam connects player and hook.
+        - VectorForce pulls the player toward target.
+    4. RELEASE:
+        - Triggered when close to target or player cancels.
+        - Cleans up all temporary objects & enters cooldown before next grapple.
+    5. UI + FEEDBACK:
+        - Crosshair changes color on failure.
+        - Debug label shows current state.
+        - Update loop syncs UI with grappling state.
+]]
 
 --// SERVICES
 local Players = game:GetService("Players")
@@ -12,9 +41,9 @@ local UserInputService = game:GetService("UserInputService")
 local MAX_DISTANCE = 300
 local FORCE_MULTIPLIER = 4000
 local COOLDOWN_TIME = 2
-local ANGLE_LIMIT = 120 -- Max angle from camera forward to allow grappling
+local ANGLE_LIMIT = 120 -- max degrees from camera forward direction
 
---// STATE ENUM for readability
+--// STATE ENUM — improves clarity over multiple booleans
 local GrappleState = {
 	Idle = "Idle",
 	Active = "Active",
@@ -44,13 +73,13 @@ function Grapple.new(player)
 	return self
 end
 
---// INITIALIZE INPUT + UI
+-- Initialize system: binds input & sets up UI
 function Grapple:Init()
 	self:SetupInput()
 	self:InitUI()
 end
 
---// Bind player input for grapple actions
+-- Binds player input for grapple actions
 function Grapple:SetupInput()
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then return end
@@ -62,26 +91,30 @@ function Grapple:SetupInput()
 	end)
 end
 
---// Player tries to grapple
+-- Player tries to grapple
 function Grapple:AttemptGrapple()
+	-- Prevents spamming during cooldown or while active
 	if self.State ~= GrappleState.Idle or tick() < self.CooldownFinish then return end
 
 	local mouse = self.Player:GetMouse()
 	local origin = self.Character:WaitForChild("Head").Position
 	local direction = (mouse.Hit.Position - origin)
 
-	-- Angle check: prevent grappling too far behind player
+	-- Angle check: ensures that the hook can’t fire directly behind player
 	local camLook = workspace.CurrentCamera.CFrame.LookVector
 	if math.deg(math.acos(camLook:Dot(direction.Unit))) > ANGLE_LIMIT then
 		self:ShowFailFeedback()
 		return
 	end
 
+	-- Raycast towards mouse position
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = {self.Character}
 	params.FilterType = Enum.RaycastFilterType.Blacklist
 
 	local result = workspace:Raycast(origin, direction.Unit * MAX_DISTANCE, params)
+
+	-- Checks if hit surface is valid
 	if result and self:IsSurfaceValid(result.Instance) then
 		self:FireHook(result.Position)
 	else
@@ -89,17 +122,17 @@ function Grapple:AttemptGrapple()
 	end
 end
 
---// Determines if a surface can be grappled to
+-- Determines if a surface can be grappled
 function Grapple:IsSurfaceValid(instance)
-	-- Use CollectionService for tagging grappleable surfaces
-	return CollectionService:HasTag(instance, "GrapplePoint") or true -- true here so it works without tagging
+	-- Tagged grapple points take priority, otherwise default to allowing all
+	return CollectionService:HasTag(instance, "GrapplePoint") or true
 end
 
---// Create hook visuals, tween into place, and attach force
+-- Create hook visuals, tween into place, and attach pulling force
 function Grapple:FireHook(hitPosition)
 	self.State = GrappleState.Active
 
-	-- Create hook part
+	-- Create hook part (visual anchor in world)
 	local hook = Instance.new("Part")
 	hook.Size = Vector3.new(0.5, 0.5, 0.5)
 	hook.Shape = Enum.PartType.Ball
@@ -111,20 +144,20 @@ function Grapple:FireHook(hitPosition)
 	hook.Name = "GrappleHook"
 	hook.Parent = workspace
 	self.HookPart = hook
-	Debris:AddItem(hook, 10) -- auto-clean after 10s
+	Debris:AddItem(hook, 10) -- Clean automatically in case of unexpected release
 
-	-- Tween hook to target position (looks nicer than instant placement)
+	-- Tween hook from player to target for visual polish
 	local tween = TweenService:Create(hook, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 		Position = hitPosition
 	})
 	tween:Play()
 
-	-- Create attachments for beam + force
+	-- Create attachments for beam & force
 	local a0 = Instance.new("Attachment", self.Root)
 	local a1 = Instance.new("Attachment", hook)
 	self.Attachments = {a0, a1}
 
-	-- Beam between player and hook
+	-- Beam visually connects player and hook
 	local beam = Instance.new("Beam")
 	beam.Attachment0 = a0
 	beam.Attachment1 = a1
@@ -136,7 +169,7 @@ function Grapple:FireHook(hitPosition)
 	beam.Parent = hook
 	self.Beam = beam
 
-	-- Pulling force
+	-- Apply pulling force
 	local force = Instance.new("VectorForce")
 	force.Attachment0 = a0
 	force.RelativeTo = Enum.ActuatorRelativeTo.World
@@ -145,28 +178,29 @@ function Grapple:FireHook(hitPosition)
 	force.Parent = self.Root
 	self.Force = force
 
-	-- Start pulling loop
-	self.HeartbeatConn = RunService.Heartbeat:Connect(function(dt)
+	-- Start continuous pull update
+	self.HeartbeatConn = RunService.Heartbeat:Connect(function()
 		self:UpdatePull(hitPosition)
 	end)
 end
 
---// Updates the pulling force every frame
+-- Update pulling force each frame
 function Grapple:UpdatePull(targetPos)
 	local direction = (targetPos - self.Root.Position)
 	local distance = direction.Magnitude
 
-	-- Rope tension logic: stronger pull if far away, weaker when close
+	-- Rope tension: pull force decreases as player gets closer
 	local tensionFactor = math.clamp(distance / MAX_DISTANCE, 0.2, 1)
 	local velocity = direction.Unit * FORCE_MULTIPLIER * tensionFactor
 	self.Force.Force = velocity
 
+	-- Release once close enough to target
 	if distance < 5 then
 		self:ReleaseHook()
 	end
 end
 
---// Release hook and reset state
+-- Release hook & cleanup
 function Grapple:ReleaseHook()
 	if self.State ~= GrappleState.Active then return end
 	self.State = GrappleState.Cooldown
@@ -183,13 +217,13 @@ function Grapple:ReleaseHook()
 	self.Attachments = {}
 	if self.HookPart then self.HookPart:Destroy() self.HookPart = nil end
 
-	-- Return to idle after cooldown
+	-- Returns to idle after cooldown
 	task.delay(COOLDOWN_TIME, function()
 		self.State = GrappleState.Idle
 	end)
 end
 
---// UI: Crosshair + debug label
+-- Creates crosshair & debugs UI
 function Grapple:InitUI()
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "GrappleUI"
@@ -215,18 +249,19 @@ function Grapple:InitUI()
 	label.Parent = gui
 	self.DebugLabel = label
 
-	-- Update UI every frame
+	-- Keeps UI synced to state
 	RunService.RenderStepped:Connect(function()
 		self:UpdateUI()
 	end)
 end
 
+-- Updates UI elements based on state
 function Grapple:UpdateUI()
 	if not self.DebugLabel then return end
 	self.DebugLabel.Text = "State: " .. self.State
 end
 
---// Visual feedback if grapple fails
+-- Visual fail feedback for invalid grapples
 function Grapple:ShowFailFeedback()
 	if self.Crosshair then
 		self.Crosshair.BackgroundColor3 = Color3.new(1, 0, 0)
